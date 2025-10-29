@@ -1,0 +1,216 @@
+services:
+  base:
+    image: "rasadov/ecommerce-base:latest"
+    build:
+      context: .
+      dockerfile: docker/base.dockerfile
+    profiles:
+      - build-only
+
+  zookeeper:
+    restart: always
+    container_name: kafka-like-zookeeper
+    image: docker.io/bitnami/zookeeper:3.8
+    ports:
+      - "21850:2181"
+    volumes:
+      - "zookeeper-volume:/bitnami"
+    environment:
+      - ALLOW_ANONYMOUS_LOGIN=yes
+
+  kafka:
+    container_name: kafka
+    hostname: kafka
+    image: docker.io/bitnami/kafka:3.3
+    depends_on:
+      - zookeeper
+    volumes:
+      - "kafka-volume:/bitnami"
+    ports:
+      - "9092:9092"
+    environment:
+      - KAFKA_BROKER_ID=1
+      - KAFKA_CFG_ZOOKEEPER_CONNECT=zookeeper:2181
+      - ALLOW_PLAINTEXT_LISTENER=yes
+      - KAFKA_CFG_LISTENER_SECURITY_PROTOCOL_MAP=CLIENT:PLAINTEXT,EXTERNAL:PLAINTEXT
+      - KAFKA_CFG_LISTENERS=CLIENT://:9092,EXTERNAL://:9093
+      - KAFKA_CFG_ADVERTISED_LISTENERS=CLIENT://kafka:9092,EXTERNAL://localhost:9093
+      - KAFKA_CFG_INTER_BROKER_LISTENER_NAME=CLIENT
+    restart: unless-stopped
+
+  account_db:
+    container_name: "account_db"
+    image: postgres:14.0
+    environment:
+      POSTGRES_DB: rasadov
+      POSTGRES_USER: rasadov
+      POSTGRES_PASSWORD: 123456
+    volumes:
+      - account_db_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  product_db:
+    container_name: "product_db"
+    image: docker.elastic.co/elasticsearch/elasticsearch-oss:6.2.4
+    environment:
+      ES_JAVA_OPTS: -Xms1g -Xmx1g
+      discovery.type: single-node
+    volumes:
+      - product_db_data:/usr/share/elasticsearch/data
+
+  order_db:
+    container_name: "order_db"
+    image: postgres:14.0
+    environment:
+      POSTGRES_DB: rasadov
+      POSTGRES_USER: rasadov
+      POSTGRES_PASSWORD: 123456
+    volumes:
+      - order_db_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  payment_db:
+    container_name: "payment_db"
+    image: postgres:14.0
+    environment:
+      POSTGRES_DB: rasadov
+      POSTGRES_USER: rasadov
+      POSTGRES_PASSWORD: 123456
+    volumes:
+      - payment_db_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  recommender_db:
+    container_name: "recommender_db"
+    image: postgres:15
+    environment:
+      POSTGRES_DB: rasadov
+      POSTGRES_USER: rasadov
+      POSTGRES_PASSWORD: 123456
+    volumes:
+      - recommender_db_data:/var/lib/postgresql/data
+    restart: unless-stopped
+
+  account:
+    container_name: "account"
+    image: "rasadov/account:latest"
+    build:
+      context: .
+      dockerfile: docker/services/account.dockerfile
+    depends_on:
+      - account_db
+    environment:
+      DATABASE_URL: postgres://rasadov:123456@account_db/rasadov?sslmode=disable
+    restart: on-failure
+
+  product:
+    container_name: "product"
+    image: "rasadov/product:latest"
+    build:
+      context: .
+      dockerfile: docker/services/product.dockerfile
+    depends_on:
+      - product_db
+      - kafka
+    environment:
+      DATABASE_URL: http://product_db:9200
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    restart: on-failure
+
+  order:
+    container_name: "order"
+    image: "rasadov/order:latest"
+    build:
+      context: .
+      dockerfile: docker/services/order.dockerfile
+    depends_on:
+      - order_db
+      - account
+      - product
+      - kafka
+    environment:
+      DATABASE_URL: postgres://rasadov:123456@order_db/rasadov?sslmode=disable
+      ACCOUNT_SERVICE_URL: account:8080
+      PRODUCT_SERVICE_URL: product:8080
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    restart: on-failure
+
+  payment:
+    container_name: "payment"
+    image: "rasadov/payment:latest"
+    build:
+      context: .
+      dockerfile: docker/services/payment.dockerfile
+    depends_on:
+      - payment_db
+      - order
+      - kafka
+    environment:
+      DATABASE_URL: postgres://rasadov:123456@payment_db/rasadov?sslmode=disable
+      ORDER_SERVICE_URL: order:8080
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+      PRODUCT_EVENTS_TOPIC: product_events
+      # Add Payment Provider Credentials
+    restart: on-failure
+
+  recommender-server:
+    container_name: "recommender"
+    image: "rasadov/recommender:latest"
+    build:
+      context: .
+      dockerfile: docker/services/recommender.dockerfile
+    command: python app/entry/main.py
+    depends_on:
+      - recommender_db
+      - kafka
+    environment:
+      DATABASE_URL: postgresql://rasadov:123456@recommender_db/rasadov?sslmode=disable
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    restart: on-failure
+
+  recommender-sync:
+    container_name: "recommender-sync"
+    image: "rasadov/recommender-sync:latest"
+    build:
+      context: .
+      dockerfile: docker/services/recommender.dockerfile
+    command: python app/entry/sync.py
+    depends_on:
+      - recommender_db
+      - kafka
+    environment:
+      DATABASE_URL: postgresql://rasadov:123456@recommender_db/rasadov?sslmode=disable
+      KAFKA_BOOTSTRAP_SERVERS: kafka:9092
+    restart: on-failure
+
+  graphql:
+    container_name: "graphql"
+    image: "rasadov/graphql:latest"
+    build:
+      context: .
+      dockerfile: docker/services/graphql.dockerfile
+    ports:
+      - "8080:8080"
+    depends_on:
+      - account
+      - product
+      - order
+      - payment
+      - recommender-server
+      - recommender-sync
+    environment:
+      ACCOUNT_SERVICE_URL: account:8080
+      PRODUCT_SERVICE_URL: product:8080
+      ORDER_SERVICE_URL: order:8080
+      PAYMENT_SERVICE_URL: payment:8080
+      RECOMMENDER_SERVICE_URL: recommender:8080
+    restart: on-failure
+
+volumes:
+  account_db_data:
+  product_db_data:
+  order_db_data:
+  payment_db_data:
+  recommender_db_data:
+  kafka-volume:
+  zookeeper-volume:
